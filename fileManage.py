@@ -1,122 +1,93 @@
-from flask import Flask, request, send_from_directory, jsonify, render_template_string, redirect, url_for
 import os
+from flask import Flask, request, send_from_directory, render_template_string, redirect, url_for, flash
 from werkzeug.utils import secure_filename
-import datetime
-import urllib.parse
 
-BASE_DIR = '/apps'
-ALLOWED_EXTENSIONS = {'jmx', 'txt', 'pdf', 'exe', 'zip', 'tar', 'gz'}  # 可以根据需要添加更多允许的文件类型
+UPLOAD_FOLDER = '/apps'  # 请替换为您的上传文件夹路径
+ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif'}
 
 app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.secret_key = "secret key"  # Required for session management and flash messages
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def get_files_and_dirs(path):
-    files = []
-    dirs = []
-    for item in os.listdir(path):
-        item_path = os.path.join(path, item)
-        if os.path.isfile(item_path):
-            size = os.path.getsize(item_path)
-            files.append((item, size))
-        else:
-            dirs.append(item)
-    return sorted(dirs), sorted(files, key=lambda x: x[0])
-
-@app.route('/', defaults={'req_path': ''})
-@app.route('/<path:req_path>')
-def index(req_path):
-    abs_path = os.path.join(BASE_DIR, req_path)
-
-    # Return 404 if path doesn't exist
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def index(path):
+    abs_path = os.path.join(UPLOAD_FOLDER, path)
     if not os.path.exists(abs_path):
-        return "404 Not Found", 404
+        return "Path does not exist", 404
 
-    # Check if path is a file and serve
-    if os.path.isfile(abs_path):
-        return send_from_directory(os.path.dirname(abs_path), os.path.basename(abs_path))
+    if os.path.isdir(abs_path):
+        raw_items = os.listdir(abs_path)
+        dirs = sorted([item for item in raw_items if os.path.isdir(os.path.join(abs_path, item))])
+        files = sorted([item for item in raw_items if os.path.isfile(os.path.join(abs_path, item))])
+        items = dirs + files
 
-    # Show directory contents
-    dirs, files = get_files_and_dirs(abs_path)
-    return render_template_string(HTML_TEMPLATE, files=files, dirs=dirs, current_path=req_path)
-
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({'message': 'No file part'}), 400
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'message': 'No selected file'}), 400
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        file_path = os.path.join(BASE_DIR, filename)
-        file.save(file_path)
-        return redirect(url_for('index'))
+        return render_template_string('''
+<!doctype html>
+<title>Files and Directories</title>
+{% if path %}
+<h2>Contents of {{ path }}</h2>
+{% else %}
+<h2>Root Directory</h2>
+{% endif %}
+<ul>
+    {% for item in items %}
+        {% set item_path = path + '/' + item if path else item %}
+        {% if os.path.isdir(os.path.join(UPLOAD_FOLDER, item_path)) %}
+            <li><a href="{{ url_for('index', path=item_path) }}">{{ item }}/</a></li>
+        {% else %}
+            {% set file_size = os.path.getsize(os.path.join(UPLOAD_FOLDER, item_path)) // 1024 %}
+            <li>{{ item }} ({{ file_size }} KB) <a href="{{ url_for('download_file', path=item_path) }}">Download</a></li>
+        {% endif %}
+    {% endfor %}
+</ul>
+<a href="{{ url_for('upload_file', path=path) }}">Upload new File</a>
+{% if path %}<a href="{{ url_for('index', path='/'.join(path.split('/')[:-1])) }}">Back</a>{% endif %}
+''', items=items, path=path, os=os, UPLOAD_FOLDER=UPLOAD_FOLDER)
     else:
-        return jsonify({'message': 'File type not allowed'}), 400
+        return "Not a directory", 400
 
-@app.route('/download/<path:filename>')
-def download_file(filename):
-    # Make sure the filename is secure
-    if '..' in filename or filename.startswith('/'):
-        return "400 Bad Request", 400
-    abs_file_path = os.path.join(BASE_DIR, filename)
-    if os.path.exists(abs_file_path):
-        return send_from_directory(directory=os.path.dirname(abs_file_path), filename=os.path.basename(abs_file_path), as_attachment=True)
+@app.route('/download/<path:path>')
+def download_file(path):
+    directory = os.path.join(UPLOAD_FOLDER, os.path.dirname(path))
+    filename = os.path.basename(path)
+    return send_from_directory(directory=directory, path=filename, as_attachment=True)
+
+@app.route('/upload/', defaults={'path': ''})
+@app.route('/upload/<path:path>', methods=['GET', 'POST'])
+def upload_file(path):
+    if path == '':
+        upload_path = UPLOAD_FOLDER
     else:
-        return jsonify({'message': 'File not found'}), 404
-
-@app.route('/delete/<path:filename>')
-def delete_file(filename):
-    # Make sure the filename is secure
-    if '..' in filename or filename.startswith('/'):
-        return "400 Bad Request", 400
-    abs_file_path = os.path.join(BASE_DIR, filename)
-    if os.path.exists(abs_file_path):
-        os.remove(abs_file_path)
-        return redirect(url_for('index'))
-    else:
-        return jsonify({'message': 'File not found'}), 404
-
-def format_size(size):
-    """Format size to a more readable format"""
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size < 1024:
-            return f"{size:.2f} {unit}"
-        size /= 1024
-    return f"{size:.2f} PB"
-
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html>
-<head>
-    <title>File Management</title>
-</head>
-<body>
-    <h2>Upload File</h2>
-    <form method="post" action="/upload" enctype="multipart/form-data">
-        <input type="file" name="file">
-        <input type="submit" value="Upload">
-    </form>
-    <h2>Directories and Files</h2>
-    <ul>
-        {% for dir in dirs %}
-        <li><a href="{{ request.path }}{{ dir }}">{{ dir }}</a></li>
-        {% endfor %}
-        {% for file, size in files %}
-        <li>{{ file }}
-            - {{ format_size(size) }}
-            - <a href="/download/{{ request.path }}{{ file }}">Download</a>
-            - <a href="/delete/{{ request.path }}{{ file }}" onclick="return confirm('Are you sure?');">Delete</a>
-        </li>
-        {% endfor %}
-    </ul>
-</body>
-</html>
-'''
-
-app.jinja_env.globals.update(format_size=format_size)  # Add format_size function to Jinja environment
+        upload_path = os.path.join(UPLOAD_FOLDER, path)
+    if not os.path.exists(upload_path):
+        os.makedirs(upload_path)
+    
+    if request.method == 'POST':
+        if 'file' not in request.files:
+            flash('No file part')
+            return redirect(request.url)
+        file = request.files['file']
+        if file.filename == '':
+            flash('No selected file')
+            return redirect(request.url)
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            file.save(os.path.join(upload_path, filename))
+            return redirect(url_for('index', path=path))
+    return render_template_string('''
+<!doctype html>
+<title>Upload new File</title>
+<h1>Upload new File</h1>
+<form method=post enctype=multipart/form-data>
+  <input type=file name=file>
+  <input type=submit value=Upload>
+</form>
+<a href="{{ url_for('index', path=path) }}">Back</a>
+''', path=path)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0',port=8000, debug=True)
+    app.run(host='0.0.0.0', port=8000)
